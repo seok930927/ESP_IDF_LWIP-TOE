@@ -14,5 +14,6 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=c:\\Users\\lihan\\Desktop\\클로드\\Basic\\basic\\build"
-  ]
+  ],
+  "idf.flashType": "UART"
 }

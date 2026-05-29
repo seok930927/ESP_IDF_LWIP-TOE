@@ -1,0 +1,51 @@
+menu "WIZnet TOE Configuration"
+
+    config WIZNET_TOE_ENABLE
+        bool "Enable WIZnet ioLibrary (W5500)"
+        default n
+        depends on ETH_USE_SPI_ETHERNET && ETH_SPI_ETHERNET_W5500
+        help
+            Enable ioLibrary_Driver based W5500 TOE component.
+            This stage only provides build integration and initialization API.
+
+    if WIZNET_TOE_ENABLE
+        # NOTE: the ioLibrary TOE path shares esp_eth's single spi_device handle
+        # and CS line (one physical W5500), so it has no separate SPI host / clock
+        # / CS / bus-acquire options. SPI pins and clock come from the EXAMPLE_ETH_*
+        # configuration used by esp_eth.
+
+        config WIZNET_TOE_DISPATCHER_ENABLE
+            bool "Enable TOE socket dispatcher"
+            default y
+            help
+                Poll W5500 socket interrupt status and dispatch events for TOE
+                sockets (1..7). Socket 0 (MACRAW) is intentionally excluded.
+
+        config WIZNET_TOE_DISPATCHER_PERIOD_MS
+            int "Dispatcher polling period (ms)"
+            range 1 100
+            default 2
+            depends on WIZNET_TOE_DISPATCHER_ENABLE
+
+        config WIZNET_TOE_ECHO_DEMO
+            bool "Enable dual echo + MACRAW-recv test demo"
+            default n
+            help
+                Test bed for the hybrid driver. Enabling this starts:
+                  - a lwIP (MACRAW / socket 0) TCP echo server on port 5000;
+                  - a TOE echo pool: hardware sockets 1..7 all listen on
+                    WIZNET_TOE_ECHO_PORT and echo received bytes;
+                  - a hook that prints "MACRAW recv" for every frame the MACRAW
+                    path hands to lwIP.
+                Use it to test both paths and to observe problem #3 (whether
+                TOE traffic is duplicated into the MACRAW/lwIP path and RSTs).
+
+        config WIZNET_TOE_ECHO_PORT
+            int "TOE echo server TCP port"
+            range 1 65535
+            default 5001
+            depends on WIZNET_TOE_ECHO_DEMO
+
+    endif
+
+endmenu

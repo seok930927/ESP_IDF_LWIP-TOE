@@ -12,6 +12,9 @@
 #if CONFIG_EXAMPLE_USE_SPI_ETHERNET
 #include "driver/spi_master.h"
 #endif // CONFIG_EXAMPLE_USE_SPI_ETHERNET
+#if CONFIG_WIZNET_TOE_ENABLE
+#include "wiznet_spi_shared.h"
+#endif
 
 #if CONFIG_EXAMPLE_SPI_ETHERNETS_NUM
 #define SPI_ETHERNETS_NUM           CONFIG_EXAMPLE_SPI_ETHERNETS_NUM
@@ -210,6 +213,13 @@ static esp_eth_handle_t eth_init_spi(spi_eth_module_config_t *spi_eth_module_con
     eth_w5500_config_t w5500_config = ETH_W5500_DEFAULT_CONFIG(CONFIG_EXAMPLE_ETH_SPI_HOST, &spi_devcfg);
     w5500_config.int_gpio_num = spi_eth_module_config->int_gpio;
     w5500_config.poll_period_ms = spi_eth_module_config->polling_ms;
+#if CONFIG_WIZNET_TOE_ENABLE
+    /* Single physical W5500, single CS: route esp_eth's SPI through the shared
+     * spi_device handle that the ioLibrary TOE path also uses. The custom SPI
+     * driver's init reads host/devcfg from the config we point it at. */
+    w5500_config.custom_spi_driver = wiznet_shared_spi_driver();
+    w5500_config.custom_spi_driver.config = &w5500_config;
+#endif
     esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&w5500_config, &mac_config);
     esp_eth_phy_t *phy = esp_eth_phy_new_w5500(&phy_config);
 #endif //CONFIG_EXAMPLE_USE_W5500
