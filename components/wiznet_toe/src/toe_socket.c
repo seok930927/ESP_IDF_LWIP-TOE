@@ -184,26 +184,38 @@ int toe_sock_recv(int sn, void *buf, size_t len)
     if (!slot_valid(sn) || buf == NULL || len == 0) {
         return -1;
     }
-    for (;;) {
-        uint16_t avail = getSn_RX_RSR((uint8_t)sn);
-        if (avail > 0) {
-            uint16_t want = (len > 0xFFFF) ? 0xFFFF : (uint16_t)len;
-            int32_t rc = recv((uint8_t)sn, (uint8_t *)buf, want);
-            if (rc == SOCK_BUSY) {
-                vTaskDelay(pdMS_TO_TICKS(2));
-                continue;
-            }
-            return (int)rc;               /* >0 bytes, or negative error */
-        }
-        uint8_t sr = getSn_SR((uint8_t)sn);
-        if (sr == SOCK_CLOSE_WAIT || sr == SOCK_CLOSED) {
-            return 0;                      /* peer closed, no buffered data left */
-        }
-        if (sr != SOCK_ESTABLISHED) {
-            return 0;
-        }
-        vTaskDelay(pdMS_TO_TICKS(5));
+
+    uint8_t sr = getSn_SR((uint8_t)sn);
+    if (sr != SOCK_ESTABLISHED && sr != SOCK_CLOSE_WAIT) {
+        return 0;                          /* not connected / peer closed */
     }
+
+    uint16_t rsr = getSn_RX_RSR((uint8_t)sn);
+    if (rsr == 0) {
+        return 0;                          /* no buffered data (caller checks first) */
+    }
+
+    /*
+     * Read the data ourselves instead of ioLibrary recv(): ioLibrary recv()
+     * ends with `while (getSn_CR(sn));` -- an UNBOUNDED, no-yield busy-wait that
+     * hangs the task (and starves the CPU) if the RECV command's completion read
+     * is delayed by SPI contention with the esp_eth/MACRAW path. Here we issue
+     * RECV and wait with a bounded, yielding loop so the task never gets stuck.
+     */
+    uint16_t want = (len > 0xFFFF) ? 0xFFFF : (uint16_t)len;
+    uint16_t rd = (rsr < want) ? rsr : want;
+
+    wiz_recv_data((uint8_t)sn, (uint8_t *)buf, rd);   /* copy out + advance Sn_RX_RD */
+    setSn_CR((uint8_t)sn, Sn_CR_RECV);                /* commit the read pointer */
+
+    for (int i = 0; i < 50; i++) {
+        if (getSn_CR((uint8_t)sn) == 0) {
+            break;                          /* command accepted (normal, ~instant) */
+        }
+        vTaskDelay(1);                      /* bounded yield (~1ms/tick @1000Hz) */
+    }
+
+    return (int)rd;
 }
 
 uint8_t toe_sock_status(int sn)

@@ -27,7 +27,7 @@ idf_component_register(
         "include"
         "lib/ioLibrary_Driver/Ethernet"
         "lib/ioLibrary_Driver/Ethernet/W5500"
-    REQUIRES driver esp_netif esp_eth
+    REQUIRES driver esp_netif esp_eth esp_timer
 )
 
 if(CONFIG_WIZNET_TOE_ENABLE)

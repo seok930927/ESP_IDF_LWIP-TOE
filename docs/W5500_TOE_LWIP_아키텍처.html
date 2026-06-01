@@ -1,0 +1,107 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+@page { size: A4; margin: 16mm 14mm; }
+* { font-family: 'Malgun Gothic','맑은 고딕',sans-serif; }
+body { font-size: 11px; line-height: 1.5; color:#1a1a1a; }
+h1 { font-size: 22px; border-bottom:3px solid #2c5; padding-bottom:6px; }
+h2 { font-size: 17px; border-bottom:1px solid #ccc; padding-bottom:4px; margin-top:22px; }
+h3 { font-size: 14px; margin-top:16px; }
+table { border-collapse: collapse; width:100%; margin:8px 0; font-size:10px; }
+th,td { border:1px solid #bbb; padding:4px 7px; text-align:left; vertical-align:top; }
+th { background:#eef6ee; }
+code { background:#f0f0f0; padding:1px 4px; border-radius:3px; font-family:Consolas,monospace; font-size:10px; }
+pre { background:#1e1e1e; color:#e8e8e8; padding:10px; border-radius:5px; overflow:auto; }
+pre code { background:none; color:#e8e8e8; font-size:9.5px; white-space:pre; }
+blockquote { border-left:4px solid #2c5; background:#f6fff6; margin:8px 0; padding:6px 12px; color:#333; }
+hr { border:none; border-top:1px solid #ddd; margin:18px 0; }
+ul,ol { margin:6px 0 6px 18px; }
+strong { color:#000; }
+</style></head><body><h1>W5500 TOE + ESP-IDF lwIP 공존 드라이버 — 소프트웨어 아키텍처</h1>
+<blockquote><strong>대상</strong>: ESP32-S3 + W5500 (단일 칩, 단일 SPI)</blockquote>
+<blockquote><strong>목표</strong>: 하나의 W5500을 <strong>esp_eth/lwIP(MACRAW)</strong> 와 <strong>ioLibrary/TOE(하드웨어 TCP-IP)</strong> 가 동시에 사용하는 재사용 가능한 드라이버</blockquote>
+<blockquote><strong>작성일</strong>: 2026-06-01</blockquote>
+<blockquote><strong>상태</strong>: lwIP 경로 + TOE 경로 양쪽 에코 동작 검증 완료</blockquote>
+<hr>
+<h2>1. 개요 및 목표</h2>
+<p>W5500은 8개의 하드웨어 소켓과 16KB(TX)/16KB(RX) 내부 버퍼를 가진 이더넷 컨트롤러다. 본 프로젝트의 목표는 <strong>하나의 W5500 칩을 두 소프트웨어 스택이 공유</strong>하게 하는 드라이버 개발이다.</p>
+<ul><li><strong>esp_eth + lwIP (MACRAW)</strong>: 표준 ESP-IDF 네트워크 스택. 풍부한 레퍼런스(BSD socket, DHCP, ICMP, mDNS 등)를 그대로 사용.</li><li><strong>ioLibrary + TOE (TCP/UDP Offload Engine)</strong>: W5500 하드웨어가 TCP/IP를 직접 처리. CPU 부하·SPI 트랜잭션이 적어 throughput 유리.</li></ul>
+<blockquote>단일 완성품이 아니라 <strong>두 세계를 모두 쓸 수 있게 하는 드라이버</strong>가 핵심 목표다.</blockquote>
+<hr>
+<h2>2. 하드웨어 구성</h2>
+<h3>2.1 보드</h3>
+<p>ESP32-S3 + W5500이 <strong>한 보드에 PCB로 고정 배선</strong>된 통합 모듈 (핸드 솔더).</p>
+<h3>2.2 핀맵 (확정)</h3>
+<table><thead><tr><th>W5500 신호</th><th>ESP32-S3 GPIO</th><th>비고</th></tr></thead><tbody><tr><td>MISO</td><td><strong>GPIO6</strong></td><td></td></tr><tr><td>MOSI</td><td><strong>GPIO9</strong></td><td></td></tr><tr><td>SCLK</td><td><strong>GPIO8</strong></td><td></td></tr><tr><td>CS (SCSn)</td><td><strong>GPIO7</strong></td><td></td></tr><tr><td>INT (INTn)</td><td><strong>GPIO44</strong></td><td>U0RXD</td></tr><tr><td>RST (RSTn)</td><td><strong>GPIO5</strong></td><td></td></tr></tbody></table>
+<ul><li>SPI host: <strong>SPI2</strong> (<code>CONFIG_EXAMPLE_ETH_SPI_HOST=1</code>), GPIO matrix 라우팅.</li><li><strong>콘솔은 USB-Serial-JTAG 사용</strong> (UART0 콘솔 비활성). 사유: INT=GPIO44가 UART0(U0RXD) 핀이라, UART0 콘솔과 충돌. 보드의 단일 USB-C가 네이티브 USB(USB-JTAG)이므로 로그는 그쪽으로 출력.</li></ul>
+<hr>
+<h2>3. 핵심 아키텍처</h2>
+<h3>3.1 소켓 분배</h3>
+<pre><code>W5500 (소켓 0 ~ 7, 내부 버퍼 16KB → 2KB × 8 분배)
+ ├─ 소켓 0      : MACRAW 모드  → esp_eth → lwIP   (L2~L4 소프트웨어 처리)
+ └─ 소켓 1 ~ 7  : TCP/UDP(TOE) → ioLibrary         (L2~L4 하드웨어 처리)</code></pre>
+<ul><li><strong>소켓 0 (MACRAW)</strong>: 들어오는 이더넷 프레임을 그대로 lwIP에 전달. ARP/DHCP/ICMP(ping)/표준 BSD socket이 모두 동작.</li><li><strong>소켓 1~7 (TOE)</strong>: W5500 하드웨어가 핸드셰이크·ACK·재전송까지 직접 처리. CPU는 데이터만 read/write.</li></ul>
+<h3>3.2 전체 구조도</h3>
+<pre><code>              앱 코드
+   ┌────────────────┴─────────────────┐
+   │                                  │
+ BSD socket()                    toe_sock_*()
+ (lwip/sockets.h)                (toe_socket.h)
+   │                                  │
+ esp_netif / lwIP                ioLibrary (socket.c)
+   │                                  │
+ esp_eth (W5500 MAC)             wiznet_spi_port (coalescing)
+   │  custom_spi_driver               │
+   └──────────────┬───────────────────┘
+                  │
+        wiznet_spi_shared
+        (단일 spi_device 핸들 + 재귀 뮤텍스)
+                  │
+            ESP SPI master (SPI2)
+                  │
+               W5500 칩</code></pre>
+<h3>3.3 단일 SPI 핸들 공유 (핵심 설계)</h3>
+<p><strong>문제</strong>: 칩 하나·CS 하나인데 두 드라이버가 SPI를 두드림. 각자 SPI 디바이스를 만들거나 수동 CS를 토글하면 CS 라우팅이 충돌.</p>
+<p><strong>해결</strong>: <strong>하나의 <code>spi_device</code> 핸들을 esp_eth와 ioLibrary가 공유.</strong></p>
+<ul><li><code>wiznet_spi_shared.c</code>: esp_eth의 W5500 <strong>custom SPI driver</strong>(init/deinit/read/write)를 제공. 단일 <code>spi_device</code> 핸들과 <strong>재귀 뮤텍스</strong>를 소유.</li><li><code>ethernet_init.c</code>: <code>w5500_config.custom_spi_driver</code>에 이 드라이버를 주입 → esp_eth가 이 핸들로 SPI 수행.</li><li><code>wiznet_spi_port.c</code>: ioLibrary의 바이트/버스트 콜백을, esp_eth와 동일한 프레임 포맷(cmd=16비트 주소, addr=8비트 제어)의 <strong>단일 트랜잭션으로 합쳐서(coalescing)</strong> 같은 핸들로 전송.</li><li>모든 SPI 접근은 재귀 뮤텍스로 <strong>직렬화</strong>되어 레지스터 깨짐 없이 공존.</li></ul>
+<h3>3.4 버퍼 분배</h3>
+<p>esp_eth 기본은 소켓0에 16KB 전부, 소켓1~7에 0KB를 할당 → TOE 소켓이 버퍼가 없음. <code>wiznet_toe_partition_sockets()</code>가 <strong>소켓 OPEN 전(esp_eth 시작 전)</strong> 에 8소켓 <strong>2KB씩</strong> 재분배. (제어 트래픽만 타는 MACRAW엔 2KB로 충분, 대용량은 TOE로.)</p>
+<hr>
+<h2>4. 통합 과정에서 해결한 문제</h2>
+<table><thead><tr><th>#</th><th>문제</th><th>원인</th><th>해결</th></tr></thead><tbody><tr><td>1</td><td><strong>칩 리셋 레이스</strong></td><td><code>wizchip_init()</code>의 <code>MR_RST</code>가 esp_eth 설정을 통째로 지움</td><td>ioLibrary init에서 풀 리셋 호출 제거. 칩 리셋·소켓0 설정은 esp_eth가 단독 소유</td></tr><tr><td>2</td><td><strong>버퍼 분배 충돌</strong></td><td>esp_eth=소켓0 16KB, 1~7=0KB</td><td>소켓 OPEN 전 2KB×8 재분배</td></tr><tr><td>3</td><td><strong>MACRAW 중복수신</strong></td><td>소켓0 MAC필터가 &quot;내 MAC 유니캐스트&quot;를 다 받음 → TOE 패킷도 소켓0이 받아 lwIP가 RST</td><td><strong>부분 미해결</strong> (아래 §7)</td></tr><tr><td>4</td><td><strong>SPI CS 충돌</strong></td><td>두 드라이버가 같은 CS핀을 다른 방식으로 제어</td><td>단일 spi_device 핸들 공유 (§3.3)</td></tr><tr><td>-</td><td><strong>콘솔 UART 충돌</strong></td><td>INT=GPIO44=U0RXD, MISO 등과 UART0 핀 겹침</td><td>콘솔을 USB-Serial-JTAG로 전환</td></tr><tr><td>-</td><td><strong>핀맵 오인</strong></td><td>거울상 배선도 → MISO/RST 핀 오해</td><td>실측 확정 (MISO=6, RST=5)</td></tr><tr><td>-</td><td><strong>워치독 (디스패처/에코)</strong></td><td><code>vTaskDelay(2ms)</code>가 100Hz 틱에서 0틱 → busy-spin</td><td><code>CONFIG_FREERTOS_HZ=1000</code> + 딜레이 최소 1틱 보장</td></tr><tr><td>-</td><td><strong>recv 무한 블로킹</strong></td><td>ioLibrary <code>recv()</code> 내부 <code>while(getSn_CR)</code> 등 <strong>no-yield busy-wait</strong>가 SPI 경합 시 멈춤</td><td><code>toe_sock_recv</code>를 직접 구현(데이터 읽기 + RECV + <strong>유한+yield</strong> 대기)으로 우회</td></tr></tbody></table>
+<hr>
+<h2>5. 소프트웨어 구성요소</h2>
+<h3>5.1 신규 컴포넌트: <code>components/wiznet_toe/</code></h3>
+<table><thead><tr><th>파일</th><th>역할</th></tr></thead><tbody><tr><td><code>src/wiznet_spi_shared.c</code></td><td>esp_eth용 custom SPI 드라이버. 단일 핸들 + 재귀 뮤텍스 소유 (공유의 심장)</td></tr><tr><td><code>src/wiznet_spi_port.c</code></td><td>ioLibrary 콜백 → 공유 핸들 트랜잭션으로 coalescing</td></tr><tr><td><code>src/wiznet_toe.c</code></td><td>TOE 초기화(리셋 없이), 버퍼 분배, 타임아웃</td></tr><tr><td><code>src/toe_netif.c</code></td><td><code>toe0</code> netif(메타데이터) 생성, eth0 DHCP IP 동기화</td></tr><tr><td><code>src/toe_socket.c</code></td><td>최소 TOE 소켓 API (open/connect/listen/send/<strong>recv 직접구현</strong>/close)</td></tr><tr><td><code>src/toe_dispatcher.c</code></td><td>TOE 소켓 인터럽트 폴링 (현재 에코에선 비활성)</td></tr><tr><td><code>src/toe_demo.c</code></td><td>TOE 에코 풀(소켓 1~7) 데모</td></tr><tr><td><code>lib/ioLibrary_Driver/</code></td><td>WIZnet ioLibrary (socket.c, w5500.c, wizchip_conf.c)</td></tr></tbody></table>
+<h3>5.2 수정한 기존 컴포넌트</h3>
+<table><thead><tr><th>파일</th><th>수정</th></tr></thead><tbody><tr><td><code>components/ethernet_init/ethernet_init.c</code></td><td>W5500에 custom SPI driver 주입 + 스펙 준수 HW 리셋(10ms low/60ms settle)</td></tr><tr><td><code>main/ethernet_example_main.c</code></td><td>TOE init 순서 조정, toe0 생성/IP 동기화, lwIP 에코 서버(5000), MACRAW 수신 로그 훅</td></tr><tr><td><code>sdkconfig</code></td><td>핀맵, 콘솔(USB-JTAG), <code>FREERTOS_HZ=1000</code>, TOE/에코 옵션</td></tr></tbody></table>
+<h3>5.3 데모 동작 (<code>WIZNET_TOE_ECHO_DEMO=y</code>)</h3>
+<ul><li><strong>lwIP(MACRAW) 에코</strong>: 포트 5000 (표준 BSD socket)</li><li><strong>TOE 에코 풀</strong>: 소켓 1~7이 각각 포트 5001~5007에서 listen·에코</li><li><strong>MACRAW 수신 로그</strong>: 소켓0이 받은 프레임마다 출력 (문제3 관찰용)</li></ul>
+<hr>
+<h2>6. 현재 동작 상태 (검증됨)</h2>
+<table><thead><tr><th>항목</th><th>결과</th></tr></thead><tbody><tr><td>W5500 칩 인식 (VERSIONR=0x04)</td><td>✅</td></tr><tr><td>단일 SPI 핸들 공유 (esp_eth + ioLibrary)</td><td>✅</td></tr><tr><td>eth0 DHCP IP 획득 + toe0 동기화</td><td>✅</td></tr><tr><td><strong>lwIP/MACRAW</strong>: ping, 에코(5000)</td><td>✅</td></tr><tr><td><strong>TOE</strong>: 연결 + 에코(5001~)</td><td>✅</td></tr><tr><td>워치독 없음 (안정 동작)</td><td>✅</td></tr></tbody></table>
+<p>→ <strong>단일 W5500을 lwIP와 TOE가 SPI 하나로 공유하며 양쪽 모두 데이터 송수신 동작.</strong></p>
+<hr>
+<h2>7. 남은 작업</h2>
+<h3>7.1 분기(branch) — 현재는 &quot;수동/병렬&quot;</h3>
+<p>지금은 <strong>자동 분기가 없다.</strong> 앱이 직접 API를 선택:</p>
+<ul><li>lwIP 원하면 → 표준 <code>socket()</code></li><li>TOE 원하면 → <code>toe_sock_*()</code></li></ul>
+<p>두 경로는 독립 병렬로 돌고 SPI 핸들에서만 직렬화된다.</p>
+<p><strong>계획(Phase 4, 미구현)</strong>: 표준 <code>socket()</code> 진입점에 <strong>VFS/shim</strong>을 얹어 자동 라우팅</p>
+<p>(TCP→TOE, UDP 유니캐스트→TOE, UDP 멀티캐스트→lwIP, 슬롯 부족→lwIP fallback).</p>
+<h3>7.2 우선순위 과제</h3>
+<ol><li><strong><code>toe_sock_send</code> 방어 수정</strong> — <code>send()</code>도 ioLibrary의 SENDOK busy-wait가 남아 있어 부하 시 멈출 수 있음. recv처럼 직접 구현 권장.</li><li><strong>문제3 필터</strong> — <code>macraw_rx_input</code>에서 TOE 포트(5001~) 패킷을 lwIP에 올리기 전 drop → lwIP RST 스톰 차단.</li><li><strong>자동 분기 shim</strong> — §7.1.</li><li><strong>검증 매트릭스</strong> — 7소켓 동시, throughput(iperf), lwIP+TOE 동시 부하, 장시간 안정성.</li></ol>
+<hr>
+<h2>8. 빌드 / 플래시 노트</h2>
+<ul><li>ESP-IDF <strong>v5.5.1</strong>, 타겟 <strong>esp32s3</strong>.</li><li>venv 파이썬: <code>idf5.5_py3.11_env</code> (시스템 <code>py</code>는 3.13이라 export 실패 → 3.11 venv 직접 지정 필요).</li><li>한글 콘솔(cp949)에서 idf.py 출력 인코딩 깨짐 → <code>PYTHONUTF8=1</code> 설정.</li><li>플래시/모니터 포트: <strong>USB-Serial-JTAG (VID_303A&amp;PID_1001)</strong>. 칩 리부팅 시 COM 번호 재열거될 수 있음.</li></ul>
+<hr>
+<h2>부록 A. 핵심 데이터 흐름 (TOE 수신 에코)</h2>
+<pre><code>PC ──TCP data──▶ W5500 소켓N(하드웨어 수신/ACK)
+                      │
+        toe_echo_task 폴링: getSn_RX_RSR &gt; 0
+                      │
+        toe_sock_recv: wiz_recv_data() ──SPI(공유핸들/뮤텍스)──▶ 데이터 read
+                      │  setSn_CR(RECV) + 유한·yield 대기
+        toe_sock_send: ──SPI──▶ TX버퍼 write + SEND
+                      │
+W5500 소켓N ──TCP data──▶ PC (에코)</code></pre>
+<h2>부록 B. 문제3 상세 (중복수신)</h2>
+<p>소켓0이 MACRAW + MAC 필터(내 MAC + 브로드캐스트)로 동작 → TOE(소켓1~7)로 가는 <strong>유니캐스트 패킷도 소켓0이 중복 수신</strong>. esp_eth가 이를 lwIP에 올리면, lwIP는 해당 포트 리스너가 없으므로 <strong>RST</strong>를 보낼 수 있음(실측 확인). 경부하에선 동작하나, 부하 시 RST·SPI 경합으로 성능/안정성 저하 가능 → §7.2-2 필터 필요.</p></body></html>

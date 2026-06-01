@@ -9,6 +9,10 @@
 #include "esp_mac.h"
 #include "driver/gpio.h"
 #include "sdkconfig.h"
+#if CONFIG_WIZNET_TOE_ENABLE
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
 #if CONFIG_EXAMPLE_USE_SPI_ETHERNET
 #include "driver/spi_master.h"
 #endif // CONFIG_EXAMPLE_USE_SPI_ETHERNET
@@ -219,9 +223,43 @@ static esp_eth_handle_t eth_init_spi(spi_eth_module_config_t *spi_eth_module_con
      * driver's init reads host/devcfg from the config we point it at. */
     w5500_config.custom_spi_driver = wiznet_shared_spi_driver();
     w5500_config.custom_spi_driver.config = &w5500_config;
+
+    /* Proper W5500 hardware reset BEFORE the chip is read. esp_eth's built-in
+     * reset_hw() only pulses RSTn low for 100us with no settle delay, which is
+     * below the datasheet (~500us low, ~50ms to ready) and can leave the chip
+     * not-ready when VERSIONR is read (yields e.g. 0x02 instead of 0x04). Do a
+     * spec-compliant reset here and disable esp_eth's short one. */
+    if (spi_eth_module_config->phy_reset_gpio >= 0) {
+        gpio_config_t rst_cfg = {
+            .pin_bit_mask = 1ULL << spi_eth_module_config->phy_reset_gpio,
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&rst_cfg);
+        gpio_set_level(spi_eth_module_config->phy_reset_gpio, 0);  /* assert RSTn */
+        vTaskDelay(pdMS_TO_TICKS(10));
+        gpio_set_level(spi_eth_module_config->phy_reset_gpio, 1);  /* release */
+        vTaskDelay(pdMS_TO_TICKS(60));                             /* PLL/init settle */
+        phy_config.reset_gpio_num = -1;  /* skip esp_eth's too-short reset */
+        ESP_LOGI(TAG, "W5500 hardware reset done (GPIO%d, 10ms low / 60ms settle)",
+                 spi_eth_module_config->phy_reset_gpio);
+    }
 #endif
     esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&w5500_config, &mac_config);
     esp_eth_phy_t *phy = esp_eth_phy_new_w5500(&phy_config);
+#if CONFIG_WIZNET_TOE_ENABLE
+    /* DIAGNOSTIC: raw-read W5500 VERSIONR (common block, offset 0x0039) over the
+     * shared SPI before esp_eth touches the chip. Tells us what MISO actually
+     * returns: 0x04 = SPI read OK; 0xFF = chip not driving (CS/wiring/power);
+     * 0x00 = MISO stuck low; other = signal issue. Remove once detection works. */
+    if (wiznet_shared_spi_ready()) {
+        uint8_t diag_ver = 0;
+        wiznet_shared_spi_raw(true, 0x0039, 0x00, &diag_ver, 1);
+        ESP_LOGW(TAG, "DIAG: raw W5500 VERSIONR = 0x%02x (expect 0x04)", diag_ver);
+    }
+#endif
 #endif //CONFIG_EXAMPLE_USE_W5500
     // Init Ethernet driver to default and install it
     esp_eth_handle_t eth_handle = NULL;

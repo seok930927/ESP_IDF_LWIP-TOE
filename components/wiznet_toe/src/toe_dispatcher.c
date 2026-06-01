@@ -22,6 +22,14 @@ static void wiznet_toe_dispatcher_task(void *arg)
 {
     (void)arg;
 
+    /* Guarantee at least 1 RTOS tick of delay. At the default 100Hz tick rate
+     * pdMS_TO_TICKS(2) rounds down to 0, which makes vTaskDelay(0) a no-op and
+     * lets this task busy-spin -> IDLE starves -> task watchdog. Clamp to >=1. */
+    TickType_t poll_delay = pdMS_TO_TICKS(CONFIG_WIZNET_TOE_DISPATCHER_PERIOD_MS);
+    if (poll_delay == 0) {
+        poll_delay = 1;
+    }
+
     while (s_dispatcher_running) {
         uint8_t sir = getSIR();
         uint8_t toe_mask = (uint8_t)(sir & 0xFE); // socket 1..7 only, socket 0 reserved for MACRAW
@@ -46,7 +54,7 @@ static void wiznet_toe_dispatcher_task(void *arg)
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(CONFIG_WIZNET_TOE_DISPATCHER_PERIOD_MS));
+        vTaskDelay(poll_delay);
     }
 
     vTaskDelete(NULL);
