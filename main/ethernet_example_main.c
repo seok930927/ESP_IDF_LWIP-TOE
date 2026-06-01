@@ -239,7 +239,14 @@ void app_main(void)
     s_toe_netif = wiznet_toe_netif_create(toe_mac);
     ESP_ERROR_CHECK(s_toe_netif != NULL ? ESP_OK : ESP_FAIL);
     ESP_LOGI(TAG, "WIZnet ioLibrary + toe0 initialized (netif-level split baseline)");
-    ESP_LOGI(TAG, "WIZnet ioLibrary is initialized (stage 1)");
+
+    /* Report per-netif ifindex. (Do NOT esp_netif_action_start(toe0): toe0 is a
+     * dummy/metadata netif with no real driver_handle, so esp_netif_start's
+     * mandatory-config sanity check aborts -> boot loop. A valid TOE ifindex
+     * will need toe0 to carry a minimal driver; handled when the BSD shim lands.) */
+    int eth_ifindex = esp_netif_get_netif_impl_index(eth_netifs[0]);
+    int toe_ifindex = esp_netif_get_netif_impl_index(s_toe_netif);
+    ESP_LOGI(TAG, "netif ifindex -> eth0=%d, toe0=%d", eth_ifindex, toe_ifindex);
 #endif
 
 #if CONFIG_EXAMPLE_ETH_DEINIT_AFTER_S >= 0
