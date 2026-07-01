@@ -135,6 +135,12 @@ int wiz_listen(int fd, int backlog)
     if (fd_is_toe(fd)) {
         int sn = fd_to_sn(fd);
         uint16_t port = s_bind_port[sn & 0x7];
+        if (port == 0) {
+            /* No prior wiz_bind() -> we'd LISTEN on an ephemeral port, i.e. a
+             * server nobody can reach. Fail loudly instead of doing that. */
+            ESP_LOGE(TAG, "listen(fd=%d): no bound port (call wiz_bind first)", fd);
+            return -1;
+        }
         /* (Re)open the hardware socket on the bound port, then LISTEN. The
          * W5500 sets the local port at socket-open time, so we reopen here. */
         toe_sock_close(sn);

@@ -128,9 +128,14 @@ esp_err_t wiznet_shared_spi_raw(bool is_read, uint32_t cmd, uint32_t addr, void 
 
     if (is_read) {
         /* Small register reads use the in-transaction rx_data to avoid 4-byte
-         * boundary overwrites on the caller's buffer (mirrors esp_eth). */
-        trans.flags = (len <= 4) ? SPI_TRANS_USE_RXDATA : 0;
-        trans.rx_buffer = data;
+         * boundary overwrites on the caller's buffer (mirrors esp_eth). rx_data
+         * and rx_buffer share a union, so only set one: rx_data (via the flag)
+         * for <=4 bytes, rx_buffer otherwise. */
+        if (len <= 4) {
+            trans.flags = SPI_TRANS_USE_RXDATA;
+        } else {
+            trans.rx_buffer = data;
+        }
     } else {
         trans.tx_buffer = data;
     }

@@ -183,8 +183,10 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
 
 #if CONFIG_WIZNET_TOE_ENABLE
     if (s_toe_netif != NULL) {
-        ESP_ERROR_CHECK(wiznet_toe_netif_sync_ip(s_toe_netif, ip_info));
-        ESP_ERROR_CHECK(wiznet_toe_apply_ip_to_chip(ip_info));
+        /* Runs on every GOT_IP (incl. DHCP renewals). A transient SPI error here
+         * must not abort the whole app, so do NOT use ESP_ERROR_CHECK. */
+        ESP_ERROR_CHECK_WITHOUT_ABORT(wiznet_toe_netif_sync_ip(s_toe_netif, ip_info));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(wiznet_toe_apply_ip_to_chip(ip_info));
         ESP_LOGI(TAG, "toe0 synced to eth0 DHCP address");
 #if CONFIG_WIZNET_TOE_ECHO_DEMO
         /* Chip now has a valid IP -> the TOE TCP engine can listen/connect. */
