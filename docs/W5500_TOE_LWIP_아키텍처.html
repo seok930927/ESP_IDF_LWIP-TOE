@@ -39,25 +39,35 @@ strong { color:#000; }
  ├─ 소켓 0      : MACRAW 모드  → esp_eth → lwIP   (L2~L4 소프트웨어 처리)
  └─ 소켓 1 ~ 7  : TCP/UDP(TOE) → ioLibrary         (L2~L4 하드웨어 처리)</code></pre>
 <ul><li><strong>소켓 0 (MACRAW)</strong>: 들어오는 이더넷 프레임을 그대로 lwIP에 전달. ARP/DHCP/ICMP(ping)/표준 BSD socket이 모두 동작.</li><li><strong>소켓 1~7 (TOE)</strong>: W5500 하드웨어가 핸드셰이크·ACK·재전송까지 직접 처리. CPU는 데이터만 read/write.</li></ul>
-<h3>3.2 전체 구조도</h3>
-<pre><code>              앱 코드
-   ┌────────────────┴─────────────────┐
-   │                                  │
- BSD socket()                    toe_sock_*()
- (lwip/sockets.h)                (toe_socket.h)
-   │                                  │
- esp_netif / lwIP                ioLibrary (socket.c)
-   │                                  │
- esp_eth (W5500 MAC)             wiznet_spi_port (coalescing)
-   │  custom_spi_driver               │
-   └──────────────┬───────────────────┘
-                  │
-        wiznet_spi_shared
-        (단일 spi_device 핸들 + 재귀 뮤텍스)
-                  │
-            ESP SPI master (SPI2)
-                  │
-               W5500 칩</code></pre>
+<h3>3.2 전체 구조도 (목표 아키텍처)</h3>
+<p>핵심 목표는 <strong>앱이 표준 BSD <code>socket()</code>/<code>send()</code>/<code>recv()</code>만 사용</strong>하고, 그 아래 <strong>BSD socket shim(분기 레이어)</strong> 이 경로를 자동으로 가르는 것이다.</p>
+<pre><code>                       앱 코드
+            (표준 BSD: socket/send/recv 만)
+                          │
+            ┌─────────────▼──────────────┐
+            │   BSD socket shim (분기)    │   ⬜ 계획 (미구현)
+            │   TCP / UDP 유니캐스트 → TOE  │
+            │   UDP 멀티캐스트       → lwIP │
+            │   선택 키: toe0 ifindex      │
+            └──────┬───────────────┬──────┘
+                   │               │
+            toe_sock_* (TOE)   lwip_socket (lwIP)   ✅ 둘 다 동작
+                   │               │
+            ioLibrary          esp_netif / lwIP
+            (socket.c)             │
+                   │           esp_eth (W5500 MAC)
+            wiznet_spi_port        │  custom_spi_driver 주입
+            (coalescing)          │
+                   └───────┬───────┘
+                           │
+                 wiznet_spi_shared           ✅ 단일 SPI 핸들 공유
+                 (단일 spi_device + 재귀 뮤텍스)
+                           │
+                     ESP SPI master (SPI2)
+                           │
+                  W5500 (소켓0=MACRAW, 1~7=TOE)</code></pre>
+<table><thead><tr><th>레이어</th><th>상태</th></tr></thead><tbody><tr><td><strong>BSD socket shim (분기)</strong></td><td>⬜ <strong>계획 — 다음 단계</strong> (§7.1)</td></tr><tr><td>toe_sock_* / lwip_socket (두 경로)</td><td>✅ 동작 검증</td></tr><tr><td>ioLibrary / esp_eth + 공유 SPI 드라이버</td><td>✅</td></tr><tr><td>wiznet_spi_shared (단일 핸들)</td><td>✅</td></tr></tbody></table>
+<blockquote><strong>현재 상태</strong>: shim이 아직 없어서, 앱이 <code>toe_sock_*()</code> 와 <code>lwip socket()</code> 을 <strong>직접</strong> 골라 호출한다(병렬). shim을 얹으면 앱은 표준 <code>socket()</code> 하나만 쓰고 내부에서 자동 분기된다. (현재 vs 목표 비교는 §7.1)</blockquote>
 <h3>3.3 단일 SPI 핸들 공유 (핵심 설계)</h3>
 <p><strong>문제</strong>: 칩 하나·CS 하나인데 두 드라이버가 SPI를 두드림. 각자 SPI 디바이스를 만들거나 수동 CS를 토글하면 CS 라우팅이 충돌.</p>
 <p><strong>해결</strong>: <strong>하나의 <code>spi_device</code> 핸들을 esp_eth와 ioLibrary가 공유.</strong></p>
@@ -75,6 +85,19 @@ strong { color:#000; }
 <table><thead><tr><th>파일</th><th>수정</th></tr></thead><tbody><tr><td><code>components/ethernet_init/ethernet_init.c</code></td><td>W5500에 custom SPI driver 주입 + 스펙 준수 HW 리셋(10ms low/60ms settle)</td></tr><tr><td><code>main/ethernet_example_main.c</code></td><td>TOE init 순서 조정, toe0 생성/IP 동기화, lwIP 에코 서버(5000), MACRAW 수신 로그 훅</td></tr><tr><td><code>sdkconfig</code></td><td>핀맵, 콘솔(USB-JTAG), <code>FREERTOS_HZ=1000</code>, TOE/에코 옵션</td></tr></tbody></table>
 <h3>5.3 데모 동작 (<code>WIZNET_TOE_ECHO_DEMO=y</code>)</h3>
 <ul><li><strong>lwIP(MACRAW) 에코</strong>: 포트 5000 (표준 BSD socket)</li><li><strong>TOE 에코 풀</strong>: 소켓 1~7이 각각 포트 5001~5007에서 listen·에코</li><li><strong>MACRAW 수신 로그</strong>: 소켓0이 받은 프레임마다 출력 (문제3 관찰용)</li></ul>
+<h3>5.4 초기화 흐름 (<code>app_main</code>)</h3>
+<pre><code>① example_eth_init()  → esp_eth 드라이버 + 소켓0 MACRAW + 공유 SPI 드라이버   [main:161]
+② wiznet_toe_init()   → ioLibrary + 소켓1~7 버퍼분배 (TOE 엔진)              [main:169]
+③ esp_netif_init()    → lwIP 시동                                          [main:173]
+④ eth0 netif 생성     → esp_netif_new + esp_eth_new_netif_glue + attach     [main:185]
+⑤ esp_eth_start()     → MACRAW OPEN (링크업 시)                             [main:220]
+⑥ toe0 netif 생성     → wiznet_toe_netif_create (메타 netif + ifindex)      [main:239]</code></pre>
+<blockquote><strong>&quot;소켓0 = MACRAW&quot; 모드 설정</strong>은 우리 코드가 아니라 <strong>esp_eth의 W5500 드라이버 내부</strong>(<code>w5500_setup_default</code>)가 <code>driver_install</code>(①) 시점에 수행한다. 우리는 거기에 <strong>공유 SPI 드라이버만 주입</strong>한다.</blockquote>
+<table><thead><tr><th>항목</th><th><strong>MACRAW (eth0)</strong></th><th><strong>TOE (toe0)</strong></th></tr></thead><tbody><tr><td>엔진 init</td><td>① <code>example_eth_init</code></td><td>② <code>wiznet_toe_init</code></td></tr><tr><td>netif 생성</td><td>④ <code>esp_netif_new</code> + glue + attach</td><td>⑥ <code>wiznet_toe_netif_create</code></td></tr><tr><td>lwIP 라우팅</td><td><strong>함</strong> (glue로 연결)</td><td><strong>안 함</strong> (메타 netif)</td></tr><tr><td>시작</td><td>⑤ <code>esp_eth_start</code></td><td>(소켓 open 시)</td></tr></tbody></table>
+<blockquote>두 경로 모두 같은 W5500 칩 + 같은 SPI 핸들을 공유한다. MACRAW = ①+④+⑤ (esp_eth 표준), TOE = ②+⑥ (본 프로젝트 추가).</blockquote>
+<p>각 netif는 독립 <code>esp_netif_t</code> 객체로 관리되어 고유 ifindex를 가진다:</p>
+<pre><code>int eth_ifindex = esp_netif_get_netif_impl_index(eth_netifs[0]); // MACRAW
+int toe_ifindex = esp_netif_get_netif_impl_index(s_toe_netif);   // TOE (선택 키)</code></pre>
 <hr>
 <h2>6. 현재 동작 상태 (검증됨)</h2>
 <table><thead><tr><th>항목</th><th>결과</th></tr></thead><tbody><tr><td>W5500 칩 인식 (VERSIONR=0x04)</td><td>✅</td></tr><tr><td>단일 SPI 핸들 공유 (esp_eth + ioLibrary)</td><td>✅</td></tr><tr><td>eth0 DHCP IP 획득 + toe0 동기화</td><td>✅</td></tr><tr><td><strong>lwIP/MACRAW</strong>: ping, 에코(5000)</td><td>✅</td></tr><tr><td><strong>TOE</strong>: 연결 + 에코(5001~)</td><td>✅</td></tr><tr><td>워치독 없음 (안정 동작)</td><td>✅</td></tr></tbody></table>

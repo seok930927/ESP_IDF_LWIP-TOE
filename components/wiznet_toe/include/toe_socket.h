@@ -58,6 +58,11 @@ int toe_sock_send(int sn, const void *buf, size_t len);
  * bytes read, 0 on orderly peer close, or a negative ioLibrary error. */
 int toe_sock_recv(int sn, void *buf, size_t len);
 
+/* 1 if the socket is in SOCK_ESTABLISHED (still connected, peer not FIN'd),
+ * else 0. Lets the BSD shim implement blocking recv semantics without pulling
+ * ioLibrary status constants out of the component. */
+int toe_sock_connected(int sn);
+
 /* Raw W5500 Sn_SR status byte (SOCK_ESTABLISHED, SOCK_LISTEN, ...). */
 uint8_t toe_sock_status(int sn);
 

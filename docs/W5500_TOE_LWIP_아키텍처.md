@@ -52,28 +52,46 @@ W5500 (소켓 0 ~ 7, 내부 버퍼 16KB → 2KB × 8 분배)
 - **소켓 0 (MACRAW)**: 들어오는 이더넷 프레임을 그대로 lwIP에 전달. ARP/DHCP/ICMP(ping)/표준 BSD socket이 모두 동작.
 - **소켓 1~7 (TOE)**: W5500 하드웨어가 핸드셰이크·ACK·재전송까지 직접 처리. CPU는 데이터만 read/write.
 
-### 3.2 전체 구조도
+### 3.2 전체 구조도 (목표 아키텍처)
+
+핵심 목표는 **앱이 표준 BSD `socket()`/`send()`/`recv()`만 사용**하고, 그 아래 **BSD socket shim(분기 레이어)** 이 경로를 자동으로 가르는 것이다.
 
 ```
-              앱 코드
-   ┌────────────────┴─────────────────┐
-   │                                  │
- BSD socket()                    toe_sock_*()
- (lwip/sockets.h)                (toe_socket.h)
-   │                                  │
- esp_netif / lwIP                ioLibrary (socket.c)
-   │                                  │
- esp_eth (W5500 MAC)             wiznet_spi_port (coalescing)
-   │  custom_spi_driver               │
-   └──────────────┬───────────────────┘
-                  │
-        wiznet_spi_shared
-        (단일 spi_device 핸들 + 재귀 뮤텍스)
-                  │
-            ESP SPI master (SPI2)
-                  │
-               W5500 칩
+                       앱 코드
+            (표준 BSD: socket/send/recv 만)
+                          │
+            ┌─────────────▼──────────────┐
+            │   BSD socket shim (분기)    │   ⬜ 계획 (미구현)
+            │   TCP / UDP 유니캐스트 → TOE  │
+            │   UDP 멀티캐스트       → lwIP │
+            │   선택 키: toe0 ifindex      │
+            └──────┬───────────────┬──────┘
+                   │               │
+            toe_sock_* (TOE)   lwip_socket (lwIP)   ✅ 둘 다 동작
+                   │               │
+            ioLibrary          esp_netif / lwIP
+            (socket.c)             │
+                   │           esp_eth (W5500 MAC)
+            wiznet_spi_port        │  custom_spi_driver 주입
+            (coalescing)          │
+                   └───────┬───────┘
+                           │
+                 wiznet_spi_shared           ✅ 단일 SPI 핸들 공유
+                 (단일 spi_device + 재귀 뮤텍스)
+                           │
+                     ESP SPI master (SPI2)
+                           │
+                  W5500 (소켓0=MACRAW, 1~7=TOE)
 ```
+
+| 레이어 | 상태 |
+|---|---|
+| **BSD socket shim (분기)** | ⬜ **계획 — 다음 단계** (§7.1) |
+| toe_sock_* / lwip_socket (두 경로) | ✅ 동작 검증 |
+| ioLibrary / esp_eth + 공유 SPI 드라이버 | ✅ |
+| wiznet_spi_shared (단일 핸들) | ✅ |
+
+> **현재 상태**: shim이 아직 없어서, 앱이 `toe_sock_*()` 와 `lwip socket()` 을 **직접** 골라 호출한다(병렬). shim을 얹으면 앱은 표준 `socket()` 하나만 쓰고 내부에서 자동 분기된다. (현재 vs 목표 비교는 §7.1)
 
 ### 3.3 단일 SPI 핸들 공유 (핵심 설계)
 
@@ -134,6 +152,34 @@ esp_eth 기본은 소켓0에 16KB 전부, 소켓1~7에 0KB를 할당 → TOE 소
 - **lwIP(MACRAW) 에코**: 포트 5000 (표준 BSD socket)
 - **TOE 에코 풀**: 소켓 1~7이 각각 포트 5001~5007에서 listen·에코
 - **MACRAW 수신 로그**: 소켓0이 받은 프레임마다 출력 (문제3 관찰용)
+
+### 5.4 초기화 흐름 (`app_main`)
+
+```
+① example_eth_init()  → esp_eth 드라이버 + 소켓0 MACRAW + 공유 SPI 드라이버   [main:161]
+② wiznet_toe_init()   → ioLibrary + 소켓1~7 버퍼분배 (TOE 엔진)              [main:169]
+③ esp_netif_init()    → lwIP 시동                                          [main:173]
+④ eth0 netif 생성     → esp_netif_new + esp_eth_new_netif_glue + attach     [main:185]
+⑤ esp_eth_start()     → MACRAW OPEN (링크업 시)                             [main:220]
+⑥ toe0 netif 생성     → wiznet_toe_netif_create (메타 netif + ifindex)      [main:239]
+```
+
+> **"소켓0 = MACRAW" 모드 설정**은 우리 코드가 아니라 **esp_eth의 W5500 드라이버 내부**(`w5500_setup_default`)가 `driver_install`(①) 시점에 수행한다. 우리는 거기에 **공유 SPI 드라이버만 주입**한다.
+
+| 항목 | **MACRAW (eth0)** | **TOE (toe0)** |
+|---|---|---|
+| 엔진 init | ① `example_eth_init` | ② `wiznet_toe_init` |
+| netif 생성 | ④ `esp_netif_new` + glue + attach | ⑥ `wiznet_toe_netif_create` |
+| lwIP 라우팅 | **함** (glue로 연결) | **안 함** (메타 netif) |
+| 시작 | ⑤ `esp_eth_start` | (소켓 open 시) |
+
+> 두 경로 모두 같은 W5500 칩 + 같은 SPI 핸들을 공유한다. MACRAW = ①+④+⑤ (esp_eth 표준), TOE = ②+⑥ (본 프로젝트 추가).
+
+각 netif는 독립 `esp_netif_t` 객체로 관리되어 고유 ifindex를 가진다:
+```c
+int eth_ifindex = esp_netif_get_netif_impl_index(eth_netifs[0]); // MACRAW
+int toe_ifindex = esp_netif_get_netif_impl_index(s_toe_netif);   // TOE (선택 키)
+```
 
 ---
 

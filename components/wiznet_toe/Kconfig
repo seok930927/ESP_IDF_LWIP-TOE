@@ -46,6 +46,41 @@ menu "WIZnet TOE Configuration"
             default 5001
             depends on WIZNET_TOE_ECHO_DEMO
 
+        config WIZNET_TOE_BSD_CLIENT_DEMO
+            bool "BSD shim client demo (board connects out via wiz_socket)"
+            default n
+            help
+                After getting an IP, open a socket with the BSD shim
+                (wiz_socket -> TCP routes to TOE), connect to a server, send a
+                message and print the echo. Proves the shim's data path
+                end-to-end through the TOE hardware path.
+
+        config WIZNET_TOE_BSD_SERVER_IP
+            string "BSD client demo: server IP"
+            default "192.168.11.42"
+            depends on WIZNET_TOE_BSD_CLIENT_DEMO
+
+        config WIZNET_TOE_BSD_SERVER_PORT
+            int "BSD client demo: server TCP port"
+            range 1 65535
+            default 6000
+            depends on WIZNET_TOE_BSD_CLIENT_DEMO
+
+        config WIZNET_TOE_BSD_SERVER_DEMO
+            bool "BSD shim server demo (echo via wiz_socket/bind/listen/accept)"
+            default n
+            help
+                A TCP echo server written with the BSD shim (wiz_socket ->
+                TCP routes to TOE). Lets you compare, with the SAME client-side
+                test (PC connects to the board), against the known-good direct
+                TOE echo server. Listens on WIZNET_TOE_BSD_SERVER_DEMO_PORT.
+
+        config WIZNET_TOE_BSD_SERVER_DEMO_PORT
+            int "BSD shim server demo: listen port"
+            range 1 65535
+            default 5010
+            depends on WIZNET_TOE_BSD_SERVER_DEMO
+
     endif
 
 endmenu

@@ -29,6 +29,12 @@ esp_err_t wiznet_toe_register_socket_event_cb(wiznet_toe_socket_event_cb_t cb, v
  * (problem #3). Safe to call once the chip has a valid IP (after GOT_IP). */
 esp_err_t wiznet_toe_start_echo_server(uint16_t port);
 
+/* Optional BSD-shim TCP echo server demo (CONFIG_WIZNET_TOE_BSD_SERVER_DEMO).
+ * Same behaviour as the direct echo server above, but written entirely with
+ * the BSD shim (wiz_socket/bind/listen/accept/recv/send/close) so the routing
+ * layer is exercised end-to-end. Pass 0 to use CONFIG_WIZNET_TOE_BSD_SERVER_DEMO_PORT. */
+esp_err_t wiznet_toe_start_bsd_echo(uint16_t port);
+
 #ifdef __cplusplus
 }
 #endif

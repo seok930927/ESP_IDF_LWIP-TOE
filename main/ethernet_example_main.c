@@ -18,6 +18,8 @@
 #include "sdkconfig.h"
 #if CONFIG_WIZNET_TOE_ENABLE
 #include "wiznet_toe.h"
+#include "toe_bsd.h"
+#include "lwip/sockets.h"
 #endif
 #if CONFIG_WIZNET_TOE_ECHO_DEMO
 #include "esp_rom_sys.h"
@@ -97,6 +99,45 @@ static void lwip_echo_task(void *arg)
 }
 #endif
 
+#if CONFIG_WIZNET_TOE_BSD_CLIENT_DEMO
+/* BSD shim client demo: open via wiz_socket (TCP -> TOE), connect to a server,
+ * send/recv. Proves the shim routes standard-style BSD calls through the TOE
+ * hardware path end-to-end. */
+static void bsd_client_demo_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    for (int n = 0; ; n++) {
+        int fd = wiz_socket(AF_INET, SOCK_STREAM, 0);   /* TCP -> routed to TOE */
+        struct sockaddr_in dst = { .sin_family = AF_INET };
+        dst.sin_port = htons(CONFIG_WIZNET_TOE_BSD_SERVER_PORT);
+        dst.sin_addr.s_addr = inet_addr(CONFIG_WIZNET_TOE_BSD_SERVER_IP);
+        ESP_LOGI(TAG, "[bsd-client] connect %s:%d via %s (fd=%d)",
+                 CONFIG_WIZNET_TOE_BSD_SERVER_IP, CONFIG_WIZNET_TOE_BSD_SERVER_PORT,
+                 wiz_fd_is_toe(fd) ? "TOE" : "lwIP", fd);
+        if (wiz_connect(fd, (struct sockaddr *)&dst, sizeof(dst)) != 0) {
+            ESP_LOGW(TAG, "[bsd-client] connect failed");
+            wiz_close(fd);
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            continue;
+        }
+        char msg[48];
+        int mlen = snprintf(msg, sizeof(msg), "hello-via-shim-%d", n);
+        wiz_send(fd, msg, mlen, 0);
+        char rx[64];
+        int r = wiz_recv(fd, rx, sizeof(rx) - 1, 0);
+        if (r > 0) {
+            rx[r] = '\0';
+            ESP_LOGI(TAG, "[bsd-client] echo back: '%s' (%d B)", rx, r);
+        } else {
+            ESP_LOGW(TAG, "[bsd-client] recv=%d", r);
+        }
+        wiz_close(fd);
+        vTaskDelay(pdMS_TO_TICKS(3000));
+    }
+}
+#endif
+
 /** Event handler for Ethernet events */
 static void eth_event_handler(void *arg, esp_event_base_t event_base,
                               int32_t event_id, void *event_data)
@@ -148,6 +189,17 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
 #if CONFIG_WIZNET_TOE_ECHO_DEMO
         /* Chip now has a valid IP -> the TOE TCP engine can listen/connect. */
         ESP_ERROR_CHECK_WITHOUT_ABORT(wiznet_toe_start_echo_server(0));
+#endif
+#if CONFIG_WIZNET_TOE_BSD_SERVER_DEMO
+        /* Same echo, but driven through the BSD shim (build-level A/B test). */
+        ESP_ERROR_CHECK_WITHOUT_ABORT(wiznet_toe_start_bsd_echo(0));
+#endif
+#if CONFIG_WIZNET_TOE_BSD_CLIENT_DEMO
+        static bool bsd_client_started = false;
+        if (!bsd_client_started) {
+            bsd_client_started = true;
+            xTaskCreate(bsd_client_demo_task, "bsd_client", 4096, NULL, 5, NULL);
+        }
 #endif
     }
 #endif
@@ -247,6 +299,18 @@ void app_main(void)
     int eth_ifindex = esp_netif_get_netif_impl_index(eth_netifs[0]);
     int toe_ifindex = esp_netif_get_netif_impl_index(s_toe_netif);
     ESP_LOGI(TAG, "netif ifindex -> eth0=%d, toe0=%d", eth_ifindex, toe_ifindex);
+
+    /* BSD shim 라우팅 코어 sanity 체크: 정책상 TCP는 TOE로, UDP는 lwIP로 가야 함.
+     * (네트워크 없이도 분기 결정이 맞는지 로그로 확인) */
+    {
+        int t = wiz_socket(AF_INET, SOCK_STREAM, 0);   /* 기대: TOE */
+        int u = wiz_socket(AF_INET, SOCK_DGRAM, 0);    /* 기대: lwIP */
+        ESP_LOGI(TAG, "wiz routing check -> TCP:%s(fd=%d)  UDP:%s(fd=%d)",
+                 wiz_fd_is_toe(t) ? "TOE" : "lwIP", t,
+                 wiz_fd_is_toe(u) ? "TOE" : "lwIP", u);
+        wiz_close(t);
+        wiz_close(u);
+    }
 #endif
 
 #if CONFIG_EXAMPLE_ETH_DEINIT_AFTER_S >= 0

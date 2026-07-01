@@ -13,6 +13,8 @@ if(CONFIG_WIZNET_TOE_ENABLE)
         "src/toe_netif.c"
         "src/toe_dispatcher.c"
         "src/toe_socket.c"
+        "src/toe_bsd.c"
+        "src/toe_bsd_demo.c"
         "src/toe_demo.c"
     )
 else()
@@ -27,7 +29,7 @@ idf_component_register(
         "include"
         "lib/ioLibrary_Driver/Ethernet"
         "lib/ioLibrary_Driver/Ethernet/W5500"
-    REQUIRES driver esp_netif esp_eth esp_timer
+    REQUIRES driver esp_netif esp_eth esp_timer lwip
 )
 
 if(CONFIG_WIZNET_TOE_ENABLE)

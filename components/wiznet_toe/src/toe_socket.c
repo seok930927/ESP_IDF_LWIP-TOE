@@ -218,6 +218,14 @@ int toe_sock_recv(int sn, void *buf, size_t len)
     return (int)rd;
 }
 
+int toe_sock_connected(int sn)
+{
+    if (!slot_valid(sn)) {
+        return 0;
+    }
+    return (getSn_SR((uint8_t)sn) == SOCK_ESTABLISHED) ? 1 : 0;
+}
+
 uint8_t toe_sock_status(int sn)
 {
     if (!slot_valid(sn)) {
